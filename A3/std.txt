@@ -1,0 +1,390 @@
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <semaphore.h>
+#include <pthread.h>
+#include <sys/stat.h>
+#include <time.h>
+
+
+/*void PrintQueue(Queue* q) {
+    if (IsEmpty(q)) {
+        printf("empty que\n");
+        return;
+    }
+    printf("print out all elements：\n");
+    int index = q->front;
+    int i;
+    for (i = 0; i < q->size; i++) {
+        index++;
+        index %= 30;
+        printf("%d ", q->data[index]);
+    }
+    printf("\n");
+}*/
+
+
+void logStart(char* tID);//function to log that a new thread is started
+void logFinish(char* tID);//function to log that a thread has finished its time
+
+void startClock();//function to start program clock
+long getCurrentTime();//function to check current time since clock was started
+time_t programClock;//the global timer/clock for the program
+sem_t sema;
+int rcount;//use to indicate the number of threads has passed.
+
+typedef struct thread //represents a single thread, you can add more members if required
+{
+	char tid[4];//id of the thread as read from file
+	int tidi;//tid in integer form
+	int property;//odd or even, 0=even, odd=1
+	unsigned int startTime;
+	int state;
+	int prestate;//use to indicate that it is right before critical
+        int condition;//0= exist; 1= created, 2=log started 2= right before critical  3= right after critical 4=finished critical  5= finished execution
+	pthread_t handle;
+	int retVal;//the pthread is to be put here.
+} Thread;
+
+typedef struct {
+    Thread* data[30];
+    int front; //location of the first element
+    int rear; //location of the last element
+    int size; //number of elements in the que
+}Queue;
+ 
+Queue* createQueue() {
+    Queue* q = (Queue*)malloc(sizeof(Queue));
+    q->front = -1;
+    q->rear = -1;
+    q->size = 0;
+    return q;
+}
+int firstId(Queue* q){
+	return q->data[q->rear]->tidi;
+}
+int firstProperty(Queue* q){
+	return q->data[q->rear]->property;
+}
+/*Thread qualifiedInQue(Queue* q){
+	for (i = 0; i < q->size; i++) {
+        if (q->data[i].property==indic) return q->data[i];}
+	return q->data[q->front];
+}*/
+
+int IsFull(Queue* q) {//0 is false
+    return (q->size == 30);
+}
+ 
+void addQ(Queue* q, Thread* item) {
+    q->rear++;
+    q->rear %= 30;
+    q->size++;
+    q->data[q->rear] = item;
+}
+ 
+int isEmpty(Queue* q) {
+    return (q->size == 0);
+}
+int queAll(Queue* q,int cond){
+	if (isEmpty(q)) return 0;
+	for (int i = 0; i < q->size; i++) {
+        if (q->data[i]->condition!=cond) return 0;}
+	return 1;
+}
+void deleteQ(Queue* q) {
+    if (isEmpty(q)) return ;
+    q->front++;
+    q->front %= 30; //0 1 2 3 4 5
+    q->size--;
+    //return q->data[q->front];
+}
+
+int conditionCheck(Queue* q,int condition){//1 = indeed some one has the wanted condition.
+	if (isEmpty(q)) return 0;
+ 	for (int i = 0; i < q->size; i++) {
+        if (q->data[i]->condition==condition) return 1;}
+	return 0;
+}
+
+int queHas(Queue* q,int tidi){
+	//int index = q->front;
+	if (isEmpty(q)) return 0;
+	for (int i = 0; i < q->size; i++) {
+        if (q->data[i]->tidi==tidi) return 1;}
+	return 0;
+}
+
+//you can add more functions here if required
+
+int threadsLeft(Thread* threads, int threadCount);
+int threadToStart(Thread* threads, int threadCount);
+void* threadRun(void* t);//the thread function, the code executed by each thread
+int readFile(char* fileName, Thread** threads);//function to read the file content and build array of threads
+int indic;//use to find the next contender automatically.
+Thread* threads;
+int threadCount;
+Queue* waitingQue;
+int awaker;//use to find the next contender manually.
+int isend;
+
+int main(int argc, char *argv[])
+{
+	isend = 0;
+	if(argc<2)
+	{
+		printf("Input file name missing...exiting with error code -1\n");
+		return -1;
+	}
+	waitingQue=createQueue();//the waiting priority queue
+	sem_init(&sema, 0, 1);//possible for only one thread to run critical.
+	indic=1969;//to indicate the even/odd of the next thread.0=even, 1=odd, 1969=init value
+	awaker=1969;//init to be a strange value.
+        //you can add some suitable code anywhere in main() if required
+	//int count=0;
+	threads = NULL;
+	threadCount = readFile(argv[1],&threads);
+
+	startClock();
+	while(threadsLeft(threads, threadCount)>0)//put a suitable condition here to run your program
+	{//you can add some suitable code anywhere in this loop if required
+		int i = 0;
+		while((i=threadToStart(threads, threadCount))>-1)
+		{
+			threads[i].state = 1;
+			//indic= threads[i] % 2;
+			threads[i].retVal = pthread_create(&(threads[i].handle),NULL,threadRun,&threads[i]);
+		}
+	}
+	return 0;
+}
+
+int readFile(char* fileName, Thread** threads)//do not modify this method
+{
+	FILE *in = fopen(fileName, "r");
+	if(!in)
+	{
+		printf("Child A: Error in opening input file...exiting with error code -1\n");
+		return -1;
+	}
+	struct stat st;
+	fstat(fileno(in), &st);
+	char* fileContent = (char*)malloc(((int)st.st_size+1)* sizeof(char));
+	fileContent[0]='\0';
+	while(!feof(in))
+	{
+		char line[100];
+		if(fgets(line,100,in)!=NULL)
+		{
+			strncat(fileContent,line,strlen(line));
+		}
+	}
+	fclose(in);
+
+	char* command = NULL;
+	int threadCount = 0;
+	char* fileCopy = (char*)malloc((strlen(fileContent)+1)*sizeof(char));
+	strcpy(fileCopy,fileContent);
+	command = strtok(fileCopy,"\r\n");
+	while(command!=NULL)
+	{
+		threadCount++;
+		command = strtok(NULL,"\r\n");
+	}
+	*threads = (Thread*) malloc(sizeof(Thread)*threadCount);
+	char* lines[threadCount];
+	command = NULL;
+	int i=0;
+	command = strtok(fileContent,"\r\n");
+	while(command!=NULL)
+	{
+		lines[i] = malloc(sizeof(command)*sizeof(char));
+		strcpy(lines[i],command);
+		i++;
+		command = strtok(NULL,"\r\n");
+	}
+
+	for(int k=0; k<threadCount; k++)
+	{
+		char* token = NULL;
+		int j = 0;
+		token =  strtok(lines[k],";");
+		while(token!=NULL)
+		{
+//if you have extended the Thread struct then here
+//you can do initialization of those additional members
+//or any other action on the Thread members
+			(*threads)[k].state=0;
+			(*threads)[k].prestate=0;
+			if(j==0){
+				strcpy((*threads)[k].tid,token);
+				char stf[3];
+				memcpy( stf, &token[1], 2 );
+				stf[2]='\0';
+				//stf=strtok(stf,"t");
+				(*threads)[k].condition=0;
+				(*threads)[k].tidi=atoi(stf);///////////////////////////////////////////////////////////////////
+				printf("id is %d\n",(*threads)[k].tidi);
+				(*threads)[k].property=atoi(stf) % 2;///////////////////////////////////////////////////////////
+				printf("property is %d\n",(*threads)[k].property);
+				
+			}
+			if(j==1)
+				(*threads)[k].startTime=atoi(token);
+			j++;
+			token = strtok(NULL,";");
+		}
+	}
+	return threadCount;
+}
+
+void logStart(char* tID)
+{
+	printf("[%ld] New Thread with ID %s is started.\n", getCurrentTime(), tID);
+}
+
+void logFinish(char* tID)
+{
+	printf("[%ld] Thread with ID %s is finished.\n", getCurrentTime(), tID);
+}
+
+int threadsLeft(Thread* threads, int threadCount)
+//return the number of threads that are not executed.
+{
+	int remainingThreads = 0;
+	for(int k=0; k<threadCount; k++)
+	{
+		if(threads[k].state>-1)
+			remainingThreads++;
+	}
+	return remainingThreads;
+}
+int threadIsEarly(Thread* threads, int threadCount, int startTime)
+{
+	for(int k=0; k<threadCount; k++)
+	{
+		if(threads[k].state==1) {
+			if (threads[k].startTime < startTime) {
+				return 0;
+		   	}
+		}
+	}
+	return 1;	
+}
+int threadsTrueLeft(Thread* threads, int threadCount)
+//return the number of threads that are not created.
+{
+	int remainingThreads = 0;
+	for(int k=0; k<threadCount; k++)
+	{
+		if(threads[k].state==0) 
+			remainingThreads++;
+	}
+	return remainingThreads;
+}
+
+int futureAllSame(Thread* threads, int threadCount)//all remain threads are of the sameproperty and all threads created.
+{
+	int remainingThreads = 0;
+	int sum=0;
+	
+	for(int k=0; k<threadCount; k++)
+	{
+		if(threads[k].state==0)
+			return 0;
+		if(threads[k].state>-1) //Correct, keep it that way.
+		{	remainingThreads++;
+			sum+=threads[k].property;}
+	}
+	if((remainingThreads==sum) || (sum==0))//return 1 if all future array are made up of the same property.
+		return 1;
+	else
+		return 0;
+}
+int threadToStart(Thread* threads, int threadCount)//only care about time requirement.
+//return the next thread that is to be executed. return -1 if there is no thread meet the time.
+{
+	for(int k=0; k<threadCount; k++)
+	{
+		if(threads[k].state==0 && threads[k].startTime==getCurrentTime())
+			return k;
+	}
+	return -1;
+}
+
+
+
+void* threadRun(void* t)//implement this function in a suitable way
+{
+// 	int dirty=0;//not dirty initialized
+	Thread *th=t;
+// 	if (threadsTrueLeft(threads, threadCount)==0){
+// 		addQ(waitingQue,th);
+// 	while(1){
+// 		if(firstId(waitingQue)==th->tidi) break;
+// 	}//do not excute if there are thread in waiting que who is ready to excute critical, let them execute first.
+	
+	logStart(((Thread*)t)->tid);
+	//printf("Thread %s, id is %d property is %d, indic is %d \n",th->tid,th->tidi,th->property,indic);
+// 	th->condition=1;
+	//your synchronization logic will appear here
+	if(indic!=1969){//not the first thread, and also not meet the requirement. indic is only used here.
+// 		addQ(waitingQue,th); //add current thread into the waiting que waiting to be excuted.
+// 		dirty=1;//is dirty if entered here.
+// 		th->condition=5;
+// 		indic = th->property;
+		if (threadsTrueLeft(threads,threadCount)==0) isend = 1;
+		while(isend == 0 && th->property!=indic && threadIsEarly(threads, threadCount, th->startTime) == 0){
+			while (th->property!=indic) {
+				if (issend == 1) break;
+			}
+// 			printf(th->tid);
+// 			if (threadIsEarly(threads, threadCount, th->startTime) == 1) break;
+// 			if (isend == 1) { break;}
+// 			if (isend == 1) {break;}
+// 			break;
+// 			leave = 1;
+			
+		 }
+		//the thread will wait until its indic meet the requirement, which is all 
+	}
+// 	th->condition=2;
+	sem_wait(&sema);
+	//critical section starts here
+		if(th->property==0)//set the indic to be the opposite of current property.
+		indic=1;
+	else
+		indic=0;
+	printf("[%ld] Thread %s is in its critical section, the remaining threads are: %d\n",getCurrentTime(), th->tid,futureAllSame(threads, threadCount));
+// 	if (dirty==1){ printf("thread %d ran here",th->tidi); deleteQ(waitingQue);}//was in the waitingque
+	//critical section ends here
+// 	if(th->property==0)//set the indic to be the opposite of current property.
+// 		indic=1;
+// 	else
+// 		indic=0;
+// 	if ((!isEmpty(waitingQue))){//there are still thread in waiting and 
+// 		if (firstProperty(waitingQue)==indic) awaker=firstId(waitingQue);
+// 	}
+	sem_post(&sema);
+// 	th->condition=3;
+	//while((earlyThread(threads, threadCount)->property != th->property) && (earlyThread(threads, threadCount)->state!=-1)){}
+	logFinish(th->tid);
+// 	th->state = -1;//-1: finished runing, 1: started runing but not finished, 0, not started yet.
+// 	th->condition=4;
+	pthread_exit(0);
+	
+}
+
+void startClock()
+{
+	programClock = time(NULL);
+}
+
+long getCurrentTime()//invoke this method whenever you want check how much time units passed
+//since you invoked startClock()
+{
+	time_t now;
+	now = time(NULL);
+	return now-programClock;
+}
